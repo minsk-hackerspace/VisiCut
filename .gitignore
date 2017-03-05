@@ -19,3 +19,6 @@
 # Maven stuff:
 /lib/nbproject/private/
 /lib/build/
+
+#idea
+/.idea/
