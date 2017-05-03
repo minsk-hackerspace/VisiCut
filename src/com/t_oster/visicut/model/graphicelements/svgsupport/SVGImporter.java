@@ -49,6 +49,8 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.URI;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -122,7 +124,7 @@ public class SVGImporter extends AbstractImporter
       public void close() throws SecurityException{}
 
     };
-    
+
     try
     {
       u.clear();
@@ -131,6 +133,16 @@ public class SVGImporter extends AbstractImporter
       root = u.getDiagram(svg).getRoot();
       GraphicSet result = new GraphicSet();
       result.setBasicTransform(determineTransformation(root, svgResolution));
+
+      // The resulting transformation is the mapping of "SVG pixels" to real millimeters.
+      // If viewBox, width and height are set, this scaling can be different from
+      // the implicit svgResolution before, so we recalculate the svgResolution.
+      //
+      // Note: Modifying svgResolution at this point only affects the values
+      // of stroke-width shown in the mapping table, and nothing else, especially
+      // not the rendering or the laser engraving result.
+      double mmPerPx = (result.getBasicTransform().getScaleX() + result.getBasicTransform().getScaleY()) / 2;
+      svgResolution = 1/Util.mm2inch(mmPerPx);
       importNode(root, result, svgResolution, warnings);
       Logger.getLogger(SVGConst.SVG_LOGGER).removeHandler(svgImportLoggerHandler);
       return result;
@@ -180,6 +192,7 @@ public class SVGImporter extends AbstractImporter
     double result = 90;
     boolean AdobeIllustratorSeen = false;
     boolean WwwInkscapeComSeen = false;
+    boolean InkscapeVersion092Seen = false;
     boolean usesFlowRoot = false;
     try
     {
@@ -196,6 +209,33 @@ public class SVGImporter extends AbstractImporter
           if (line.contains("www.inkscape.org/namespaces"))
           {
             WwwInkscapeComSeen = true;
+          }
+          if (line.contains("inkscape:version="))
+          {
+	    // inkscape:version="0.92.0 ...."
+	    // inkscape:version="0.91 r"
+
+	    // FIXME: version number comparison needed here!
+	    Pattern versionPattern = Pattern.compile("inkscape:version\\s*=\\s*[\"']?([0-9]+)\\.([0-9]+)");
+	    Matcher matcher = versionPattern.matcher(line);
+	    if (matcher.find())
+	      {
+	        String vers = matcher.group();
+		// vers = "inkscape:version=\"0.92"
+
+	        int vers_maj;
+		try { vers_maj = Integer.parseInt(matcher.group(1)); }
+		catch (NumberFormatException e) { vers_maj = -1; }
+
+	        int vers_min;
+		try { vers_min = Integer.parseInt(matcher.group(2)); }
+		catch (NumberFormatException e) { vers_min = -1; }
+
+		if (((vers_maj == 0) && (vers_min >= 92)) || (vers_maj > 0))
+		  {
+		    InkscapeVersion092Seen = true;
+		  }
+              }
           }
           if (line.contains("</flowRoot>"))
           {
@@ -237,14 +277,18 @@ public class SVGImporter extends AbstractImporter
     // SVG files loaded in inkscape retain the Illustrator comment, but are saved with 90 DPI.
     if (AdobeIllustratorSeen) { result = 72; }
     if (WwwInkscapeComSeen) { result = 90; }	// inkscape wins over Illustrator
+    if (InkscapeVersion092Seen) { result = 96; }	// inkscape with known version wins over anything else.
     if (result != 90)
     {
        if (AdobeIllustratorSeen)
          {
            warnings.add("Adobe Illustrator comment seen in SVG.");
 	 }
-       warnings.add("Switching to DPI from 90 to " + result + " - Please check object size!");
-
+       if (InkscapeVersion092Seen)
+         {
+           warnings.add("Inkscape Version 0.92+ comment seen in SVG.");
+	 }
+       warnings.add("Switching DPI from 90 to " + result + " - Please check object size!");
     }
     return result;
   }
@@ -252,7 +296,7 @@ public class SVGImporter extends AbstractImporter
   /*
    * Tries to determine the Coordinate resolution in DPI.
    * SVG default is 90, but AI generates 72??
-   *
+   * Since inkscape 0.92 SVG default is 96 DPI.
    */
   private AffineTransform determineTransformation(SVGRoot root, double svgResolution)
   {
